@@ -653,6 +653,7 @@ class TelegramBot:
         keys = [
             [InlineKeyboardButton("🤖 AI", callback_data="admin_ai")],
             [InlineKeyboardButton("🔑 API Manager", callback_data="admin_api")],
+            [InlineKeyboardButton("👥 Users", callback_data="admin_users")],
             [InlineKeyboardButton("📝 Prompt Manager", callback_data="admin_prompt")],
             [InlineKeyboardButton("⚙️ Config", callback_data="admin_config")],
             [InlineKeyboardButton("📊 Stats", callback_data="admin_stats")],
@@ -786,6 +787,96 @@ class TelegramBot:
                 f"Recent logs:\n{recent_logs}",
                 reply_markup=self._admin_main_menu()
             )
+
+        elif data.startswith("admin_users"):
+            all_users = user_db.all_users
+            if not all_users:
+                await query.edit_message_text("No users yet.", reply_markup=self._admin_main_menu())
+                return
+            per_page = 10
+            page = 0
+            if data.startswith("admin_users_page_"):
+                page = int(data.split("_")[-1])
+            total_pages = (len(all_users) + per_page - 1) // per_page
+            start = page * per_page
+            end = start + per_page
+            keyboard = []
+            for u in all_users[start:end]:
+                label = u.get("username", "") or f"ID {u['id']}"
+                keyboard.append([InlineKeyboardButton(f"👤 {label}", callback_data=f"admin_user_{u['id']}")])
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton("◀️", callback_data=f"admin_users_page_{page-1}"))
+            if page < total_pages - 1:
+                nav.append(InlineKeyboardButton("▶️", callback_data=f"admin_users_page_{page+1}"))
+            if nav:
+                keyboard.append(nav)
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_back_main")])
+            await query.edit_message_text(
+                f"👥 Users ({len(all_users)})\n\nSelect a user:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        elif data.startswith("admin_user_"):
+            rest = data.split("admin_user_", 1)[1]
+            if rest.startswith("history_"):
+                parts = rest.split("_")
+                user_id = int(parts[1])
+                page = int(parts[2]) if len(parts) > 2 else 0
+                history = memory_system.get_history(user_id)
+                info = user_db.get(user_id)
+                username = info.get("username", str(user_id))
+                if not history:
+                    await query.edit_message_text(
+                        "No chat history.",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"admin_user_{user_id}")]])
+                    )
+                    return
+                per_page = 5
+                total_pages = (len(history) + per_page - 1) // per_page
+                start_idx = max(0, len(history) - (page + 1) * per_page)
+                end_idx = len(history) - page * per_page
+                messages_slice = history[start_idx:end_idx]
+                lines = [f"📋 History: {username} (p.{page+1}/{total_pages})\n"]
+                for msg in messages_slice:
+                    role = msg.get("role", "?")
+                    content = msg.get("content", "")
+                    icon = "👤" if role == "user" else "🤖"
+                    if len(content) > 200:
+                        content = content[:200] + "..."
+                    lines.append(f"{icon} {content}")
+                text = "\n".join(lines)
+                if len(text) > 4000:
+                    text = text[:4000] + "\n...(truncated)"
+                keyboard = []
+                nav = []
+                if page > 0:
+                    nav.append(InlineKeyboardButton("◀️", callback_data=f"admin_user_history_{user_id}_{page-1}"))
+                if page < total_pages - 1:
+                    nav.append(InlineKeyboardButton("▶️", callback_data=f"admin_user_history_{user_id}_{page+1}"))
+                if nav:
+                    keyboard.append(nav)
+                keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"admin_user_{user_id}")])
+                await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            else:
+                user_id = int(rest)
+                info = user_db.get(user_id)
+                username = info.get("username", "?")
+                msgs = info.get("message_count", 0)
+                first_seen = info.get("first_seen", "?")[:10]
+                last_seen = info.get("last_seen", "?")[:10]
+                text = (
+                    f"👤 User: {username}\n"
+                    f"ID: {user_id}\n"
+                    f"Messages: {msgs}\n"
+                    f"First seen: {first_seen}\n"
+                    f"Last seen: {last_seen}"
+                )
+                keyboard = [
+                    [InlineKeyboardButton("📋 Chat History", callback_data=f"admin_user_history_{user_id}_0")],
+                    [InlineKeyboardButton("🔙 Back", callback_data="admin_users")],
+                ]
+                await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
         elif data == "admin_back_main":
             await query.edit_message_text(
