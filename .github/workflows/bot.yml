@@ -1,0 +1,50 @@
+name: Run Telegram Bot
+
+on:
+  schedule:
+    - cron: '30 */5 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: bot-run
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 310
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Restore bot data
+        uses: actions/cache@v4
+        id: cache
+        with:
+          path: |
+            history/
+            memory/
+            exports/
+            backups/
+            logs/
+            users.json
+            prompt.txt
+          key: bot-data-${{ github.run_id }}
+          restore-keys: |
+            bot-data-
+
+      - name: Generate config from secrets
+        run: |
+          echo '${{ secrets.CONFIG_JSON }}' > config.json
+          echo '${{ secrets.API_KEYS_JSON }}' > apikeys.json
+
+      - name: Run bot
+        run: |
+          timeout --signal INT 285m python bot.py
+          echo "Bot cycle completed"

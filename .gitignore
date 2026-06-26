@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+history/
+memory/
+exports/
+backups/
+logs/
+config.json
+apikeys.json
+users.json
