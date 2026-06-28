@@ -237,6 +237,7 @@ ADMIN_STRINGS = {
     "errors": {"ru": "Ошибок", "en": "Errors"},
     "latency": {"ru": "Задержка", "en": "Latency"},
     "new_user_notification": {"ru": "🆕 Новый пользователь: {name} (ID: {id})\nВсего пользователей: {total}", "en": "🆕 New user: {name} (ID: {id})\nTotal users: {total}"},
+    "user_intel": {"ru": "🧠 Профиль клиента: {name} (ID: {id})\n\n{summary}\n\nСообщений: {msgs}", "en": "🧠 Client profile: {name} (ID: {id})\n\n{summary}\n\nMessages: {msgs}"},
     "lang_changed": {"ru": "Язык изменён на русский.", "en": "Language changed to English."},
     "alerts": {"ru": "🔔 Оповещения", "en": "🔔 Alerts"},
     "alert_settings": {"ru": "🔔 Настройки оповещений\n\nID администраторов для уведомлений:", "en": "🔔 Alert Settings\n\nAdmin IDs to notify:"},
@@ -305,6 +306,7 @@ class UserDB:
                 "message_count": 0,
                 "memory_id": uid,
                 "history_id": uid,
+                "intel_sent": False,
             }
             self._new_user_queue.append(user_id)
             self.save()
@@ -737,6 +739,46 @@ class TelegramBot:
             except Exception as e:
                 logger.warning(f"Failed to notify admin {admin_id}: {e}")
 
+    async def _send_user_intel(self, user_id: int):
+        uid = str(user_id)
+        user_data = user_db._data.get(uid)
+        if not user_data or user_data.get("intel_sent"):
+            return
+        name = user_data.get("username", "") or str(user_id)
+        msgs = user_data.get("message_count", 0)
+        if msgs < 2:
+            return
+        history = memory_system.get_history(user_id)
+        if not history:
+            return
+        try:
+            key_obj = api_manager.get_healthy_key()
+            if not key_obj:
+                return
+            model = config.free_models[0] if config.free_models else "openrouter/free"
+            conv_text = "\n".join(
+                f"{'Клиент' if m['role'] == 'user' else 'Лиза'}: {m['content']}"
+                for m in history[-6:]
+            )
+            prompt = (
+                "Ты — ассистент риелтора. На основе диалога с клиентом напиши краткую сводку (2-4 предложения на русском): "
+                "что менеджер должен знать о клиенте, его предпочтения, бюджет, тип недвижимости, район и т.д.\n\n"
+                f"Диалог:\n{conv_text}\n\nСводка:"
+            )
+            result = await ai_engine._call_openrouter(key_obj.key, model, [{"role": "user", "content": prompt}])
+            summary = result.get("content", "").strip() if result.get("success") else "Не удалось получить сводку."
+        except Exception as e:
+            logger.warning(f"Intel generation failed for user {user_id}: {e}")
+            summary = "Не удалось получить сводку."
+        text = t("user_intel", name=name, id=user_id, summary=summary, msgs=msgs)
+        user_data["intel_sent"] = True
+        user_db.save()
+        for admin_id in config.admins:
+            try:
+                await self.application.bot.send_message(chat_id=admin_id, text=text)
+            except Exception as e:
+                logger.warning(f"Failed to send intel to admin {admin_id}: {e}")
+
     def _register_handlers(self):
         self.application.add_handler(CommandHandler("start", self.cmd_start))
         self.application.add_handler(CommandHandler("pathfinder", self.cmd_pathfinder))
@@ -817,6 +859,10 @@ class TelegramBot:
                 "status": "ok",
             }
             logger.info(f"AI OK | user={log_data['user_id']} model={log_data['model']} latency={log_data['latency']}s tokens={log_data['tokens']}")
+
+            user_info = user_db.get(user_id)
+            if not user_info.get("intel_sent"):
+                asyncio.create_task(self._send_user_intel(user_id))
 
             question_data = result.get("question")
             if question_data:
