@@ -118,7 +118,7 @@ class Config:
         self.webhook_url = raw.get("webhook_url", "")
         self.admins = raw.get("admins", [])
         self.admin_ui_lang = raw.get("admin_ui_lang", "ru")
-        self.ssh_url = raw.get("ssh_url", "")
+        self.ssh_url = raw.get("ssh_url", "") or os.getenv("SSH_URL", "")
 
     def save(self):
         data = {
