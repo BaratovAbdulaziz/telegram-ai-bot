@@ -118,7 +118,25 @@ class Config:
         self.webhook_url = raw.get("webhook_url", "")
         self.admins = raw.get("admins", [])
         self.admin_ui_lang = raw.get("admin_ui_lang", "ru")
-        self.ssh_url = raw.get("ssh_url", "") or os.getenv("SSH_URL", "")
+        self.ssh_url = raw.get("ssh_url", "") or self._auto_ssh_url()
+
+    @staticmethod
+    def _auto_ssh_url() -> str:
+        env = os.environ
+        host = (
+            env.get("SSH_HOST", "")
+            or env.get("RAILWAY_PUBLIC_DOMAIN", "")
+            or env.get("RENDER_EXTERNAL_URL", "")
+            or env.get("REPLIT_DEV_DOMAIN", "")
+        )
+        if not host:
+            return ""
+        host = host.replace("https://", "").replace("http://", "").rstrip("/")
+        user = env.get("SSH_USER", "root")
+        port = env.get("SSH_PORT", "22")
+        if port != "22":
+            return f"ssh://{user}@{host}:{port}"
+        return f"ssh://{user}@{host}"
 
     def save(self):
         data = {
