@@ -114,7 +114,14 @@ class Config:
         self.typing_animation = raw.get("typing_animation", True)
         self.request_timeout = raw.get("request_timeout", 60)
         self.openrouter_base_url = raw.get("openrouter_base_url", "https://openrouter.ai/api/v1")
-        self.free_models = raw.get("free_models", [])
+        self.free_models = raw.get("free_models", []) or self._auto_free_models()
+
+    @staticmethod
+    def _auto_free_models() -> list:
+        env_models = os.getenv("FREE_MODELS", "")
+        if env_models:
+            return [m.strip() for m in env_models.split(",") if m.strip()]
+        return ["openrouter/free"]
         self.webhook_url = raw.get("webhook_url", "")
         self.admins = raw.get("admins", [])
         self.admin_ui_lang = raw.get("admin_ui_lang", "ru")
@@ -1297,6 +1304,8 @@ def _prompt_config():
         if token:
             config.bot_token = token
             changed = True
+    if not FILES["config"].exists() or FILES["config"].stat().st_size < 10:
+        changed = True
     if changed:
         config.save()
         print("Config saved.\n")
