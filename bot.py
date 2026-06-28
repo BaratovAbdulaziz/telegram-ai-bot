@@ -1060,7 +1060,12 @@ def index():
 def _prompt_config():
     changed = False
     if not config.bot_token or config.bot_token == "YOUR_BOT_TOKEN_HERE":
-        token = input("Enter Telegram bot token (from @BotFather): ").strip()
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        if not token:
+            try:
+                token = input("Enter Telegram bot token (from @BotFather): ").strip()
+            except EOFError:
+                token = ""
         if token:
             config.bot_token = token
             changed = True
