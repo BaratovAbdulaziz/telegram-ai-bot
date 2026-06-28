@@ -17,7 +17,7 @@ if sys.prefix != str(_VENV) and len(sys.argv) > 0 and sys.argv[0] and not sys.ar
         subprocess.check_call([sys.executable, "-m", "venv", str(_VENV)])
     pip = _VENV / "bin" / "pip"
     print("Installing dependencies...")
-    subprocess.check_call([str(pip), "install", "-q", "python-telegram-bot", "httpx", "flask"])
+    subprocess.check_call([str(pip), "install", "-q", "python-telegram-bot", "httpx", "flask", "cryptography"])
     os.execv(str(_VENV / "bin" / "python"), [str(_VENV / "bin" / "python"), *sys.argv])
 
 # =============================================================================
@@ -25,13 +25,23 @@ if sys.prefix != str(_VENV) and len(sys.argv) > 0 and sys.argv[0] and not sys.ar
 # =============================================================================
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
+import re
+import secrets
 import shutil
 import signal
 import time
 from datetime import datetime, timezone
 from typing import Optional
+
+try:
+    from cryptography.fernet import Fernet
+    HAS_CRYPTOGRAPHY = True
+except ImportError:
+    HAS_CRYPTOGRAPHY = False
 
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -43,6 +53,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
 
 BASE_DIR = Path(__file__).parent.resolve()
 DIRS = {
@@ -132,6 +143,17 @@ class Config:
 
 config = Config()
 
+
+def _get_fernet():
+    if not HAS_CRYPTOGRAPHY:
+        return None
+    master = os.environ.get("API_ENCRYPTION_KEY", "")
+    if not master:
+        master = config.bot_token if config.bot_token else "default-master-key"
+    key = base64.urlsafe_b64encode(hashlib.sha256(master.encode()).digest())
+    return Fernet(key)
+
+
 # =============================================================================
 # ADMIN UI LOCALIZATION
 # =============================================================================
@@ -196,6 +218,20 @@ ADMIN_STRINGS = {
     "latency": {"ru": "Задержка", "en": "Latency"},
     "new_user_notification": {"ru": "🆕 Новый пользователь: {name} (ID: {id})\nВсего пользователей: {total}", "en": "🆕 New user: {name} (ID: {id})\nTotal users: {total}"},
     "lang_changed": {"ru": "Язык изменён на русский.", "en": "Language changed to English."},
+    "alerts": {"ru": "🔔 Оповещения", "en": "🔔 Alerts"},
+    "alert_settings": {"ru": "🔔 Настройки оповещений\n\nID администраторов для уведомлений:", "en": "🔔 Alert Settings\n\nAdmin IDs to notify:"},
+    "no_alerts_configured": {"ru": "Нет ID для оповещений.", "en": "No admin IDs configured."},
+    "add_alert_btn": {"ru": "➕ Добавить ID", "en": "➕ Add ID"},
+    "remove_alert_btn": {"ru": "🗑 Удалить ID", "en": "🗑 Remove ID"},
+    "send_admin_id": {"ru": "Отправьте Telegram ID администратора (число).", "en": "Send the Telegram admin ID (number)."},
+    "select_admin_remove": {"ru": "Выберите ID для удаления:", "en": "Select an ID to remove:"},
+    "admin_id_added": {"ru": "ID администратора добавлен.", "en": "Admin ID added."},
+    "admin_id_removed": {"ru": "ID администратора удалён.", "en": "Admin ID removed."},
+    "invalid_admin_id": {"ru": "Неверный ID. Отправьте числовой Telegram ID.", "en": "Invalid ID. Send a numeric Telegram ID."},
+    "messages": {"ru": "Сообщений", "en": "Messages"},
+    "first_seen": {"ru": "Впервые", "en": "First seen"},
+    "last_seen": {"ru": "Последний раз", "en": "Last seen"},
+    "question_answered": {"ru": "✅ Вы выбрали: {value}", "en": "✅ You selected: {value}"},
 }
 
 def t(key: str, **kwargs) -> str:
@@ -285,16 +321,31 @@ user_db = UserDB()
 
 class APIKey:
     def __init__(self, key: str, label: str = ""):
-        self.key = key
-        self.label = label or key[:12] + "..."
+        self._raw_key = key
+        self.label = label or self._mask_key(key)
         self.status = "healthy"
         self.latency = 0.0
         self.errors = 0
         self.last_used = None
 
+    @staticmethod
+    def _mask_key(key: str) -> str:
+        if len(key) > 8:
+            return key[:8] + "..."
+        return key
+
+    @property
+    def key(self) -> str:
+        return self._raw_key
+
     def to_dict(self):
+        fernet = _get_fernet()
+        if fernet:
+            encrypted = fernet.encrypt(self._raw_key.encode()).decode()
+        else:
+            encrypted = self._raw_key
         return {
-            "key": self.key,
+            "key_encrypted": encrypted,
             "label": self.label,
             "status": self.status,
             "latency": self.latency,
@@ -304,7 +355,19 @@ class APIKey:
 
     @classmethod
     def from_dict(cls, d: dict):
-        obj = cls(d.get("key", ""), d.get("label", ""))
+        encrypted = d.get("key_encrypted", "")
+        if encrypted:
+            fernet = _get_fernet()
+            if fernet:
+                try:
+                    raw_key = fernet.decrypt(encrypted.encode()).decode()
+                except Exception:
+                    raw_key = encrypted
+            else:
+                raw_key = encrypted
+        else:
+            raw_key = d.get("key", "")  # old format fallback
+        obj = cls(raw_key, d.get("label", ""))
         obj.status = d.get("status", "healthy")
         obj.latency = d.get("latency", 0.0)
         obj.errors = d.get("errors", 0)
@@ -522,7 +585,13 @@ class AIEngine:
         user_info = user_db.get(user_id)
         memory = memory_system.get_memory(user_id)
         prompt_text = FILES["prompt"].read_text(encoding="utf-8").strip()
-        messages = [{"role": "system", "content": prompt_text}]
+        question_instr = (
+            "\n\nYou can ask the user a question with inline buttons. "
+            "To do this include the exact JSON below in your response (replace the example text):\n"
+            '【{"question":{"text":"Your question here","options":[{"text":"Button 1","value":"option1"},{"text":"Button 2","value":"option2"}]}}】\n'
+            "The bot will automatically render the buttons. Use this ONLY when you need a structured answer."
+        )
+        messages = [{"role": "system", "content": prompt_text + question_instr}]
 
         profile = memory.get("profile", "")
         preferences = memory.get("preferences", "")
@@ -572,7 +641,18 @@ class AIEngine:
                 api_manager.mark_status(api_key_obj, "healthy", result["latency"])
                 result["model_used"] = model
                 result["api_label"] = api_key_obj.label
-                result["reply"] = result.get("content", "").strip()
+                reply_text = result.get("content", "").strip()
+                # Parse question JSON from response
+                q_match = re.search(r'【\s*(\{.*?\})\s*】', reply_text, re.DOTALL)
+                if q_match:
+                    try:
+                        q_data = json.loads(q_match.group(1))
+                        if "question" in q_data and "options" in q_data["question"]:
+                            result["question"] = q_data["question"]
+                            reply_text = reply_text.replace(q_match.group(0), "").strip()
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+                result["reply"] = reply_text
                 return result
             else:
                 last_error = result.get("error", "unknown")
@@ -621,6 +701,7 @@ class TelegramBot:
             self.application = Application.builder().token(config.bot_token).build()
         self._register_handlers()
         self.admin_sessions: dict[int, str] = {}
+        self._active_questions: dict[str, dict] = {}
 
     async def _notify_admins_new_user(self, user_id: int, data: dict):
         if not config.admins:
@@ -715,7 +796,23 @@ class TelegramBot:
             }
             logger.info(f"AI OK | user={log_data['user_id']} model={log_data['model']} latency={log_data['latency']}s tokens={log_data['tokens']}")
 
-            await message.reply_text(reply)
+            question_data = result.get("question")
+            if question_data:
+                qid = secrets.token_hex(4)
+                options_map = {opt["value"]: opt["text"] for opt in question_data.get("options", [])}
+                self._active_questions[qid] = {
+                    "user_id": user_id,
+                    "text": question_data["text"],
+                    "options_map": options_map,
+                }
+                keyboard = []
+                for opt in question_data.get("options", []):
+                    keyboard.append([
+                        InlineKeyboardButton(opt["text"], callback_data=f"cq_{qid}_{opt['value']}")
+                    ])
+                await message.reply_text(reply, reply_markup=InlineKeyboardMarkup(keyboard))
+            else:
+                await message.reply_text(reply)
         else:
             error_msg = result.get("error", "unknown")
             logger.error(f"AI FAIL | user={user_id} error={error_msg}")
@@ -730,6 +827,16 @@ class TelegramBot:
             api_manager.add_key(text)
             self.admin_sessions.pop(chat_id, None)
             await update.message.reply_text(t("key_added"), reply_markup=self._admin_main_menu())
+        elif session == "awaiting_admin_id":
+            try:
+                admin_id = int(text.strip())
+                if admin_id not in config.admins:
+                    config.admins.append(admin_id)
+                    config.save()
+                self.admin_sessions.pop(chat_id, None)
+                await update.message.reply_text(t("admin_id_added"), reply_markup=self._admin_main_menu())
+            except (ValueError, TypeError):
+                await update.message.reply_text(t("invalid_admin_id"))
         elif session == "awaiting_prompt":
             prompt_manager.set_prompt(text)
             self.admin_sessions.pop(chat_id, None)
@@ -762,6 +869,7 @@ class TelegramBot:
             [InlineKeyboardButton(t("prompt_manager"), callback_data="admin_prompt")],
             [InlineKeyboardButton(t("config"), callback_data="admin_config")],
             [InlineKeyboardButton(t("stats"), callback_data="admin_stats")],
+            [InlineKeyboardButton(t("alerts"), callback_data="admin_alerts")],
             [InlineKeyboardButton(t("lang_toggle"), callback_data="admin_toggle_lang")],
             [InlineKeyboardButton(t("exit"), callback_data="admin_exit")],
         ]
@@ -881,6 +989,78 @@ class TelegramBot:
             await query.edit_message_text(
                 f"Current {key} = {current}\nSend the new value as a JSON value."
             )
+
+        elif data == "admin_alerts":
+            admins = config.admins
+            if not admins:
+                text = t("no_alerts_configured")
+            else:
+                text = t("alert_settings") + "\n" + "\n".join(f"• {uid}" for uid in admins)
+            keyboard = [
+                [InlineKeyboardButton(t("add_alert_btn"), callback_data="admin_alerts_add")],
+                [InlineKeyboardButton(t("remove_alert_btn"), callback_data="admin_alerts_remove")],
+                [InlineKeyboardButton(t("back_btn"), callback_data="admin_back_main")],
+            ]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+        elif data == "admin_alerts_add":
+            chat_id = update.effective_chat.id
+            self.admin_sessions[chat_id] = "awaiting_admin_id"
+            await query.edit_message_text(t("send_admin_id"))
+
+        elif data == "admin_alerts_remove":
+            admins = config.admins
+            if not admins:
+                await query.edit_message_text(t("no_alerts_configured"), reply_markup=self._admin_main_menu())
+                return
+            keyboard = []
+            for uid in admins:
+                keyboard.append([InlineKeyboardButton(f"🗑 {uid}", callback_data=f"admin_alerts_del_{uid}")])
+            keyboard.append([InlineKeyboardButton(t("back_btn"), callback_data="admin_back_main")])
+            await query.edit_message_text(t("select_admin_remove"), reply_markup=InlineKeyboardMarkup(keyboard))
+
+        elif data.startswith("admin_alerts_del_"):
+            uid_str = data.split("admin_alerts_del_", 1)[1]
+            try:
+                config.admins = [a for a in config.admins if str(a) != uid_str]
+                config.save()
+            except (ValueError, TypeError):
+                pass
+            await query.edit_message_text(t("admin_id_removed"), reply_markup=self._admin_main_menu())
+
+        elif data.startswith("cq_"):
+            parts = data.split("_", 2)
+            if len(parts) < 3:
+                return
+            _, qid, value = parts
+            question = self._active_questions.pop(qid, None)
+            if not question:
+                await query.edit_message_text("Question expired.")
+                return
+            user_id = update.effective_user.id
+            if question.get("user_id") != user_id:
+                await query.answer("This question is not for you.", show_alert=True)
+                return
+            answer_text = question.get("options_map", {}).get(value, value)
+            user_db.increment_messages(user_id)
+            memory_system.add_message(user_id, "user", answer_text)
+            await query.edit_message_text(
+                t("question_answered", value=answer_text)
+            )
+            result = await ai_engine.generate(user_id, answer_text)
+            if result["success"]:
+                reply = result["reply"]
+                memory_system.add_message(user_id, "assistant", reply)
+                q_data = result.get("question")
+                if q_data:
+                    qid = secrets.token_hex(4)
+                    omap = {o["value"]: o["text"] for o in q_data.get("options", [])}
+                    self._active_questions[qid] = {"user_id": user_id, "text": q_data["text"], "options_map": omap}
+                    kb = [[InlineKeyboardButton(o["text"], callback_data=f"cq_{qid}_{o['value']}")] for o in q_data.get("options", [])]
+                    await context.bot.send_message(chat_id=update.effective_chat.id, text=reply, reply_markup=InlineKeyboardMarkup(kb))
+                else:
+                    await context.bot.send_message(chat_id=update.effective_chat.id, text=reply)
+            return
 
         elif data == "admin_stats":
             total_users = len(user_db.all_users)
