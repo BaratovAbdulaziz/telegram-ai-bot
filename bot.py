@@ -102,6 +102,14 @@ class Config:
             cls._instance._load()
         return cls._instance
 
+
+    @staticmethod
+    def _auto_free_models() -> list:
+        env_models = os.getenv("FREE_MODELS", "")
+        if env_models:
+            return [m.strip() for m in env_models.split(",") if m.strip()]
+        return ["openrouter/free"]
+
     def _load(self):
         raw = load_json(FILES["config"], {})
         self.bot_token = raw.get("bot_token", "")
@@ -115,13 +123,6 @@ class Config:
         self.request_timeout = raw.get("request_timeout", 60)
         self.openrouter_base_url = raw.get("openrouter_base_url", "https://openrouter.ai/api/v1")
         self.free_models = raw.get("free_models", []) or self._auto_free_models()
-
-    @staticmethod
-    def _auto_free_models() -> list:
-        env_models = os.getenv("FREE_MODELS", "")
-        if env_models:
-            return [m.strip() for m in env_models.split(",") if m.strip()]
-        return ["openrouter/free"]
         self.webhook_url = raw.get("webhook_url", "")
         self.admins = raw.get("admins", [])
         self.admin_ui_lang = raw.get("admin_ui_lang", "ru")
