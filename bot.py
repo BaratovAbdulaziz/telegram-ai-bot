@@ -118,6 +118,7 @@ class Config:
         self.webhook_url = raw.get("webhook_url", "")
         self.admins = raw.get("admins", [])
         self.admin_ui_lang = raw.get("admin_ui_lang", "ru")
+        self.ssh_url = raw.get("ssh_url", "")
 
     def save(self):
         data = {
@@ -135,6 +136,7 @@ class Config:
             "webhook_url": self.webhook_url,
             "admins": self.admins,
             "admin_ui_lang": self.admin_ui_lang,
+            "ssh_url": self.ssh_url,
         }
         save_json(FILES["config"], data)
 
@@ -232,6 +234,8 @@ ADMIN_STRINGS = {
     "first_seen": {"ru": "Впервые", "en": "First seen"},
     "last_seen": {"ru": "Последний раз", "en": "Last seen"},
     "question_answered": {"ru": "✅ Вы выбрали: {value}", "en": "✅ You selected: {value}"},
+    "ssh_btn": {"ru": "🔗 SSH сервер", "en": "🔗 SSH Server"},
+    "ssh_no_url": {"ru": "SSH URL не настроен. Укажите в Настройки → SSH URL.", "en": "SSH URL not configured. Set it in Config → SSH URL."},
 }
 
 def t(key: str, **kwargs) -> str:
@@ -870,9 +874,15 @@ class TelegramBot:
             [InlineKeyboardButton(t("config"), callback_data="admin_config")],
             [InlineKeyboardButton(t("stats"), callback_data="admin_stats")],
             [InlineKeyboardButton(t("alerts"), callback_data="admin_alerts")],
+        ]
+        if config.ssh_url:
+            keys.append([InlineKeyboardButton(t("ssh_btn"), url=config.ssh_url)])
+        else:
+            keys.append([InlineKeyboardButton(t("ssh_btn"), callback_data="admin_ssh")])
+        keys.extend([
             [InlineKeyboardButton(t("lang_toggle"), callback_data="admin_toggle_lang")],
             [InlineKeyboardButton(t("exit"), callback_data="admin_exit")],
-        ]
+        ])
         return InlineKeyboardMarkup(keys)
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -977,6 +987,7 @@ class TelegramBot:
                 [InlineKeyboardButton(f"{t('summary_length')} ({config.summary_length})", callback_data="admin_config_summary_length")],
                 [InlineKeyboardButton(f"{t('typing_animation')} ({config.typing_animation})", callback_data="admin_config_typing")],
                 [InlineKeyboardButton(f"{t('timeout')} ({config.request_timeout}s)", callback_data="admin_config_timeout")],
+                [InlineKeyboardButton(f"SSH URL ({config.ssh_url[:30] + '...' if len(config.ssh_url) > 30 else config.ssh_url or '⬜'})", callback_data="admin_config_ssh_url")],
                 [InlineKeyboardButton(t("back_btn"), callback_data="admin_back_main")],
             ]
             await query.edit_message_text(t("config_settings"), reply_markup=InlineKeyboardMarkup(keyboard))
@@ -989,6 +1000,9 @@ class TelegramBot:
             await query.edit_message_text(
                 f"Current {key} = {current}\nSend the new value as a JSON value."
             )
+
+        elif data == "admin_ssh":
+            await query.edit_message_text(t("ssh_no_url"), reply_markup=self._admin_main_menu())
 
         elif data == "admin_alerts":
             admins = config.admins
