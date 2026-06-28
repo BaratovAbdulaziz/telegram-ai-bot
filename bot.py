@@ -112,7 +112,7 @@ class Config:
 
     def _load(self):
         raw = load_json(FILES["config"], {})
-        self.bot_token = raw.get("bot_token", "")
+        self.bot_token = raw.get("bot_token", "") or os.getenv("BOT_TOKEN", "") or os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.current_model = raw.get("current_model", "auto")
         self.temperature = raw.get("temperature", 0.7)
         self.top_p = raw.get("top_p", 0.9)
@@ -1295,16 +1295,16 @@ def index():
 
 def _prompt_config():
     changed = False
-    if not config.bot_token or config.bot_token == "YOUR_BOT_TOKEN_HERE":
+    token = os.getenv("BOT_TOKEN", "").strip()
+    if not token:
         token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-        if not token:
-            try:
-                token = input("Enter Telegram bot token (from @BotFather): ").strip()
-            except EOFError:
-                token = ""
-        if token:
+    if token:
+        if config.bot_token != token:
             config.bot_token = token
             changed = True
+    elif not config.bot_token or config.bot_token == "YOUR_BOT_TOKEN_HERE":
+        print("ERROR: BOT_TOKEN environment variable is required.", file=sys.stderr)
+        sys.exit(1)
     if not FILES["config"].exists() or FILES["config"].stat().st_size < 10:
         changed = True
     if changed:
