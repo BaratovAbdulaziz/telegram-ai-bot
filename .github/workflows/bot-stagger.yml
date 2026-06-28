@@ -1,11 +1,9 @@
-name: Run Telegram Bot
+name: Run Telegram Bot (Stagger)
 
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '55 */2 * * *'
   workflow_dispatch:
-  push:
-    branches: [main]
 
 concurrency:
   group: bot-run

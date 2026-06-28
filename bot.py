@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import shutil
+import signal
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -104,6 +105,8 @@ class Config:
         self.openrouter_base_url = raw.get("openrouter_base_url", "https://openrouter.ai/api/v1")
         self.free_models = raw.get("free_models", [])
         self.webhook_url = raw.get("webhook_url", "")
+        self.admins = raw.get("admins", [])
+        self.admin_ui_lang = raw.get("admin_ui_lang", "ru")
 
     def save(self):
         data = {
@@ -119,6 +122,8 @@ class Config:
             "openrouter_base_url": self.openrouter_base_url,
             "free_models": self.free_models,
             "webhook_url": self.webhook_url,
+            "admins": self.admins,
+            "admin_ui_lang": self.admin_ui_lang,
         }
         save_json(FILES["config"], data)
 
@@ -126,6 +131,80 @@ class Config:
         self._load()
 
 config = Config()
+
+# =============================================================================
+# ADMIN UI LOCALIZATION
+# =============================================================================
+
+ADMIN_STRINGS = {
+    "control_panel": {"ru": "🤖 Панель управления", "en": "🤖 Control Panel"},
+    "ai": {"ru": "🤖 ИИ", "en": "🤖 AI"},
+    "api_manager": {"ru": "🔑 Управление API", "en": "🔑 API Manager"},
+    "users": {"ru": "👥 Пользователи", "en": "👥 Users"},
+    "prompt_manager": {"ru": "📝 Управление промптом", "en": "📝 Prompt Manager"},
+    "config": {"ru": "⚙️ Настройки", "en": "⚙️ Config"},
+    "stats": {"ru": "📊 Статистика", "en": "📊 Stats"},
+    "exit": {"ru": "❌ Выход", "en": "❌ Exit"},
+    "lang_toggle": {"ru": "🌐 Язык: Русский", "en": "🌐 Language: English"},
+    "admin_panel_closed": {"ru": "Панель администратора закрыта.", "en": "Admin panel closed."},
+    "ai_engine": {"ru": "🤖 Движок ИИ\n\n", "en": "🤖 AI Engine\n\n"},
+    "current_model": {"ru": "Текущая модель", "en": "Current model"},
+    "auto_fallback": {"ru": "авто (цепочка запасных)", "en": "auto (fallback chain)"},
+    "temperature": {"ru": "Температура", "en": "Temperature"},
+    "top_p": {"ru": "Top P", "en": "Top P"},
+    "max_tokens": {"ru": "Макс. токенов", "en": "Max tokens"},
+    "available_free_models": {"ru": "Доступные бесплатные модели", "en": "Available free models"},
+    "api_keys_title": {"ru": "🔑 Ключи API\n", "en": "🔑 API Keys\n"},
+    "no_keys": {"ru": "🔑 Ключи API\n\nНет настроенных ключей.", "en": "🔑 API Keys\n\nNo keys configured."},
+    "add_key_btn": {"ru": "➕ Добавить ключ", "en": "➕ Add Key"},
+    "remove_key_btn": {"ru": "🗑 Удалить ключ", "en": "🗑 Remove Key"},
+    "reload_btn": {"ru": "🔄 Перезагрузить", "en": "🔄 Reload"},
+    "back_btn": {"ru": "🔙 Назад", "en": "🔙 Back"},
+    "send_api_key": {"ru": "Отправьте API ключ для добавления.", "en": "Send me the API key to add."},
+    "no_keys_to_remove": {"ru": "Нет ключей для удаления.", "en": "No keys to remove."},
+    "select_key_remove": {"ru": "Выберите ключ для удаления:", "en": "Select a key to remove:"},
+    "key_removed": {"ru": "Ключ удалён.", "en": "Key removed."},
+    "keys_reloaded": {"ru": "API ключи перезагружены.", "en": "API keys reloaded."},
+    "current_prompt_title": {"ru": "📝 Текущий промпт", "en": "📝 Current Prompt"},
+    "edit_prompt_btn": {"ru": "✏️ Редактировать промпт", "en": "✏️ Edit Prompt"},
+    "send_edited_prompt": {"ru": "Отправьте отредактированный промпт или используйте кнопку Edit.", "en": "Send edited prompt or use Edit button."},
+    "send_new_prompt": {"ru": "Отправьте новый промпт сообщением.", "en": "Send the new prompt as a message."},
+    "config_settings": {"ru": "⚙️ Настройки конфигурации", "en": "⚙️ Config Settings"},
+    "typing_animation": {"ru": "Анимация печати", "en": "Typing Animation"},
+    "timeout": {"ru": "Таймаут", "en": "Timeout"},
+    "history_length": {"ru": "Длина истории", "en": "History Length"},
+    "summary_length": {"ru": "Длина сводки", "en": "Summary Length"},
+    "bot_statistics": {"ru": "📊 Статистика бота\n\n", "en": "📊 Bot Statistics\n\n"},
+    "users_count": {"ru": "Пользователей", "en": "Users"},
+    "api_keys_count": {"ru": "Ключей API", "en": "API Keys"},
+    "healthy": {"ru": "здоровых", "en": "healthy"},
+    "models_count": {"ru": "Моделей", "en": "Models"},
+    "recent_logs": {"ru": "Последние логи", "en": "Recent logs"},
+    "no_logs": {"ru": "Логов пока нет.", "en": "No logs yet."},
+    "no_users": {"ru": "Пользователей пока нет.", "en": "No users yet."},
+    "select_user": {"ru": "Выберите пользователя:", "en": "Select a user:"},
+    "user_title": {"ru": "👥 Пользователи", "en": "👥 Users"},
+    "no_chat_history": {"ru": "Истории чата нет.", "en": "No chat history."},
+    "chat_history_btn": {"ru": "📋 История чата", "en": "📋 Chat History"},
+    "key_added": {"ru": "API ключ добавлен.", "en": "API key added."},
+    "prompt_updated": {"ru": "Промпт обновлён.", "en": "Prompt updated."},
+    "config_updated": {"ru": "Настройка {key} обновлена.", "en": "Config {key} updated."},
+    "invalid_value": {"ru": "Неверное значение. Отправьте JSON значение (например, 0.8, 100, \"текст\").", "en": "Invalid value. Send a valid JSON value (e.g. 0.8, 100, \"text\")."},
+    "session_expired": {"ru": "Сессия истекла.", "en": "Session expired."},
+    "status": {"ru": "Статус", "en": "Status"},
+    "errors": {"ru": "Ошибок", "en": "Errors"},
+    "latency": {"ru": "Задержка", "en": "Latency"},
+    "new_user_notification": {"ru": "🆕 Новый пользователь: {name} (ID: {id})\nВсего пользователей: {total}", "en": "🆕 New user: {name} (ID: {id})\nTotal users: {total}"},
+    "lang_changed": {"ru": "Язык изменён на русский.", "en": "Language changed to English."},
+}
+
+def t(key: str, **kwargs) -> str:
+    lang = config.admin_ui_lang
+    entry = ADMIN_STRINGS.get(key, {})
+    text = entry.get(lang, entry.get("en", key))
+    if kwargs:
+        text = text.format(**kwargs)
+    return text
 
 # =============================================================================
 # LOGGER
@@ -142,6 +221,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bot")
 
+_shutdown_event = asyncio.Event()
+
 # =============================================================================
 # FILES (User DB)
 # =============================================================================
@@ -149,6 +230,7 @@ logger = logging.getLogger("bot")
 class UserDB:
     def __init__(self):
         self._data = load_json(FILES["users"], {})
+        self._new_user_queue: list[int] = []
 
     def save(self):
         save_json(FILES["users"], self._data)
@@ -166,8 +248,14 @@ class UserDB:
                 "memory_id": uid,
                 "history_id": uid,
             }
+            self._new_user_queue.append(user_id)
             self.save()
         return self._data[uid]
+
+    def pop_new_users(self) -> list[int]:
+        result = self._new_user_queue[:]
+        self._new_user_queue.clear()
+        return result
 
     def update(self, user_id: int, **kwargs):
         uid = str(user_id)
@@ -534,6 +622,18 @@ class TelegramBot:
         self._register_handlers()
         self.admin_sessions: dict[int, str] = {}
 
+    async def _notify_admins_new_user(self, user_id: int, data: dict):
+        if not config.admins:
+            return
+        name = data.get("username", "") or str(user_id)
+        total = len(user_db.all_users)
+        text = t("new_user_notification", name=name, id=user_id, total=total)
+        for admin_id in config.admins:
+            try:
+                await self.application.bot.send_message(chat_id=admin_id, text=text)
+            except Exception as e:
+                logger.warning(f"Failed to notify admin {admin_id}: {e}")
+
     def _register_handlers(self):
         self.application.add_handler(CommandHandler("start", self.cmd_start))
         self.application.add_handler(CommandHandler("pathfinder", self.cmd_pathfinder))
@@ -545,6 +645,8 @@ class TelegramBot:
         user = update.effective_user
         user_db.get(user.id)
         user_db.update(user.id, username=user.username or user.full_name)
+        for uid in user_db.pop_new_users():
+            await self._notify_admins_new_user(uid, user_db._data[str(uid)])
         await update.message.reply_text(
             f"Hello {user.full_name}! I'm your AI assistant.\n"
             f"Send me any message and I'll reply."
@@ -578,6 +680,9 @@ class TelegramBot:
 
         user_db.increment_messages(user_id)
         memory_system.add_message(user_id, "user", text)
+
+        for uid in user_db.pop_new_users():
+            await self._notify_admins_new_user(uid, user_db._data[str(uid)])
 
         # Check if in admin session
         if chat_id in self.admin_sessions:
@@ -624,11 +729,11 @@ class TelegramBot:
         if session == "awaiting_key":
             api_manager.add_key(text)
             self.admin_sessions.pop(chat_id, None)
-            await update.message.reply_text(f"API key added.", reply_markup=self._admin_main_menu())
+            await update.message.reply_text(t("key_added"), reply_markup=self._admin_main_menu())
         elif session == "awaiting_prompt":
             prompt_manager.set_prompt(text)
             self.admin_sessions.pop(chat_id, None)
-            await update.message.reply_text(f"Prompt updated.", reply_markup=self._admin_main_menu())
+            await update.message.reply_text(t("prompt_updated"), reply_markup=self._admin_main_menu())
         elif session.startswith("awaiting_config:"):
             key = session.split(":", 1)[1]
             try:
@@ -636,28 +741,29 @@ class TelegramBot:
                 setattr(config, key, val)
                 config.save()
                 self.admin_sessions.pop(chat_id, None)
-                await update.message.reply_text(f"Config {key} updated.", reply_markup=self._admin_main_menu())
+                await update.message.reply_text(t("config_updated", key=key), reply_markup=self._admin_main_menu())
             except (json.JSONDecodeError, ValueError, TypeError):
-                await update.message.reply_text("Invalid value. Send a valid JSON value (e.g. 0.8, 100, \"text\").")
+                await update.message.reply_text(t("invalid_value"))
         else:
             self.admin_sessions.pop(chat_id, None)
-            await update.message.reply_text("Session expired.", reply_markup=self._admin_main_menu())
+            await update.message.reply_text(t("session_expired"), reply_markup=self._admin_main_menu())
 
     async def cmd_pathfinder(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "🤖 Control Panel",
+            t("control_panel"),
             reply_markup=self._admin_main_menu()
         )
 
     def _admin_main_menu(self) -> InlineKeyboardMarkup:
         keys = [
-            [InlineKeyboardButton("🤖 AI", callback_data="admin_ai")],
-            [InlineKeyboardButton("🔑 API Manager", callback_data="admin_api")],
-            [InlineKeyboardButton("👥 Users", callback_data="admin_users")],
-            [InlineKeyboardButton("📝 Prompt Manager", callback_data="admin_prompt")],
-            [InlineKeyboardButton("⚙️ Config", callback_data="admin_config")],
-            [InlineKeyboardButton("📊 Stats", callback_data="admin_stats")],
-            [InlineKeyboardButton("❌ Exit", callback_data="admin_exit")],
+            [InlineKeyboardButton(t("ai"), callback_data="admin_ai")],
+            [InlineKeyboardButton(t("api_manager"), callback_data="admin_api")],
+            [InlineKeyboardButton(t("users"), callback_data="admin_users")],
+            [InlineKeyboardButton(t("prompt_manager"), callback_data="admin_prompt")],
+            [InlineKeyboardButton(t("config"), callback_data="admin_config")],
+            [InlineKeyboardButton(t("stats"), callback_data="admin_stats")],
+            [InlineKeyboardButton(t("lang_toggle"), callback_data="admin_toggle_lang")],
+            [InlineKeyboardButton(t("exit"), callback_data="admin_exit")],
         ]
         return InlineKeyboardMarkup(keys)
 
@@ -669,74 +775,80 @@ class TelegramBot:
         if data == "admin_exit":
             chat_id = update.effective_chat.id
             self.admin_sessions.pop(chat_id, None)
-            await query.edit_message_text("Admin panel closed.")
+            await query.edit_message_text(t("admin_panel_closed"))
+            return
+
+        if data == "admin_toggle_lang":
+            config.admin_ui_lang = "en" if config.admin_ui_lang == "ru" else "ru"
+            config.save()
+            await query.edit_message_text(t("lang_changed"), reply_markup=self._admin_main_menu())
             return
 
         if data == "admin_ai":
-            model_status = config.current_model if config.current_model != "auto" else "auto (fallback chain)"
-            await query.edit_message_text(
-                f"🤖 AI Engine\n\n"
-                f"Current model: {model_status}\n"
-                f"Temperature: {config.temperature}\n"
-                f"Top P: {config.top_p}\n"
-                f"Max tokens: {config.max_tokens}\n\n"
-                f"Available free models:\n" + "\n".join(f"• {m}" for m in config.free_models),
-                reply_markup=self._admin_main_menu()
+            model_status = config.current_model if config.current_model != "auto" else t("auto_fallback")
+            text = (
+                t("ai_engine")
+                + f"{t('current_model')}: {model_status}\n"
+                + f"{t('temperature')}: {config.temperature}\n"
+                + f"{t('top_p')}: {config.top_p}\n"
+                + f"{t('max_tokens')}: {config.max_tokens}\n\n"
+                + f"{t('available_free_models')}:\n" + "\n".join(f"• {m}" for m in config.free_models)
             )
+            await query.edit_message_text(text, reply_markup=self._admin_main_menu())
 
         elif data == "admin_api":
             stats = api_manager.get_stats()
             if not stats:
-                text = "🔑 API Keys\n\nNo keys configured."
+                text = t("no_keys")
             else:
-                lines = ["🔑 API Keys\n"]
+                lines = [t("api_keys_title")]
                 for i, k in enumerate(stats):
                     lines.append(f"{i+1}. {k['label']}")
-                    lines.append(f"   Status: {k['status']} | Errors: {k['errors']} | Latency: {k['latency']:.2f}s")
+                    lines.append(f"   {t('status')}: {k['status']} | {t('errors')}: {k['errors']} | {t('latency')}: {k['latency']:.2f}s")
                     lines.append("")
                 text = "\n".join(lines)
             keyboard = [
-                [InlineKeyboardButton("➕ Add Key", callback_data="admin_api_add")],
-                [InlineKeyboardButton("🗑 Remove Key", callback_data="admin_api_remove")],
-                [InlineKeyboardButton("🔄 Reload", callback_data="admin_api_reload")],
-                [InlineKeyboardButton("🔙 Back", callback_data="admin_back_main")],
+                [InlineKeyboardButton(t("add_key_btn"), callback_data="admin_api_add")],
+                [InlineKeyboardButton(t("remove_key_btn"), callback_data="admin_api_remove")],
+                [InlineKeyboardButton(t("reload_btn"), callback_data="admin_api_reload")],
+                [InlineKeyboardButton(t("back_btn"), callback_data="admin_back_main")],
             ]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
         elif data == "admin_api_add":
             chat_id = update.effective_chat.id
             self.admin_sessions[chat_id] = "awaiting_key"
-            await query.edit_message_text("Send me the API key to add.")
+            await query.edit_message_text(t("send_api_key"))
 
         elif data == "admin_api_remove":
             stats = api_manager.get_stats()
             if not stats:
-                await query.edit_message_text("No keys to remove.", reply_markup=self._admin_main_menu())
+                await query.edit_message_text(t("no_keys_to_remove"), reply_markup=self._admin_main_menu())
                 return
             keyboard = []
             for i, k in enumerate(stats):
                 keyboard.append([InlineKeyboardButton(f"🗑 {k['label']}", callback_data=f"admin_api_del_{i}")])
-            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_back_main")])
-            await query.edit_message_text("Select a key to remove:", reply_markup=InlineKeyboardMarkup(keyboard))
+            keyboard.append([InlineKeyboardButton(t("back_btn"), callback_data="admin_back_main")])
+            await query.edit_message_text(t("select_key_remove"), reply_markup=InlineKeyboardMarkup(keyboard))
 
         elif data.startswith("admin_api_del_"):
             idx = int(data.split("_")[-1])
             api_manager.remove_key(idx)
-            await query.edit_message_text("Key removed.", reply_markup=self._admin_main_menu())
+            await query.edit_message_text(t("key_removed"), reply_markup=self._admin_main_menu())
 
         elif data == "admin_api_reload":
             api_manager._load()
-            await query.edit_message_text("API keys reloaded.", reply_markup=self._admin_main_menu())
+            await query.edit_message_text(t("keys_reloaded"), reply_markup=self._admin_main_menu())
 
         elif data == "admin_prompt":
             preview = prompt_manager.get_prompt_preview(300)
             keyboard = [
-                [InlineKeyboardButton("✏️ Edit Prompt", callback_data="admin_prompt_edit")],
-                [InlineKeyboardButton("🔙 Back", callback_data="admin_back_main")],
+                [InlineKeyboardButton(t("edit_prompt_btn"), callback_data="admin_prompt_edit")],
+                [InlineKeyboardButton(t("back_btn"), callback_data="admin_back_main")],
             ]
             await query.edit_message_text(
-                f"📝 Current Prompt:\n\n{preview}\n\n"
-                f"Send edited prompt or use Edit button.",
+                f"{t('current_prompt_title')}:\n\n{preview}\n\n"
+                f"{t('send_edited_prompt')}",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
@@ -745,21 +857,21 @@ class TelegramBot:
             self.admin_sessions[chat_id] = "awaiting_prompt"
             await query.edit_message_text(
                 f"Current prompt:\n\n{prompt_manager.get_prompt()}\n\n"
-                f"Send the new prompt as a message."
+                f"{t('send_new_prompt')}"
             )
 
         elif data == "admin_config":
             keyboard = [
-                [InlineKeyboardButton(f"Temperature ({config.temperature})", callback_data="admin_config_temperature")],
-                [InlineKeyboardButton(f"Top P ({config.top_p})", callback_data="admin_config_top_p")],
-                [InlineKeyboardButton(f"Max Tokens ({config.max_tokens})", callback_data="admin_config_max_tokens")],
-                [InlineKeyboardButton(f"History Length ({config.history_length})", callback_data="admin_config_history_length")],
-                [InlineKeyboardButton(f"Summary Length ({config.summary_length})", callback_data="admin_config_summary_length")],
-                [InlineKeyboardButton(f"Typing Animation ({config.typing_animation})", callback_data="admin_config_typing")],
-                [InlineKeyboardButton(f"Timeout ({config.request_timeout}s)", callback_data="admin_config_timeout")],
-                [InlineKeyboardButton("🔙 Back", callback_data="admin_back_main")],
+                [InlineKeyboardButton(f"{t('temperature')} ({config.temperature})", callback_data="admin_config_temperature")],
+                [InlineKeyboardButton(f"{t('top_p')} ({config.top_p})", callback_data="admin_config_top_p")],
+                [InlineKeyboardButton(f"{t('max_tokens')} ({config.max_tokens})", callback_data="admin_config_max_tokens")],
+                [InlineKeyboardButton(f"{t('history_length')} ({config.history_length})", callback_data="admin_config_history_length")],
+                [InlineKeyboardButton(f"{t('summary_length')} ({config.summary_length})", callback_data="admin_config_summary_length")],
+                [InlineKeyboardButton(f"{t('typing_animation')} ({config.typing_animation})", callback_data="admin_config_typing")],
+                [InlineKeyboardButton(f"{t('timeout')} ({config.request_timeout}s)", callback_data="admin_config_timeout")],
+                [InlineKeyboardButton(t("back_btn"), callback_data="admin_back_main")],
             ]
-            await query.edit_message_text("⚙️ Config Settings", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(t("config_settings"), reply_markup=InlineKeyboardMarkup(keyboard))
 
         elif data.startswith("admin_config_"):
             key = data.split("admin_config_", 1)[1]
@@ -778,20 +890,20 @@ class TelegramBot:
             if LOG_FILE.exists():
                 with open(LOG_FILE, encoding="utf-8") as f:
                     log_lines = f.readlines()[-10:]
-            recent_logs = "".join(log_lines[-10:]) if log_lines else "No logs yet."
+            recent_logs = "".join(log_lines[-10:]) if log_lines else t("no_logs")
             await query.edit_message_text(
-                f"📊 Bot Statistics\n\n"
-                f"Users: {total_users}\n"
-                f"API Keys: {total_keys} ({healthy_keys} healthy)\n"
-                f"Models: {len(config.free_models)}\n"
-                f"Recent logs:\n{recent_logs}",
+                f"{t('bot_statistics')}"
+                f"{t('users_count')}: {total_users}\n"
+                f"{t('api_keys_count')}: {total_keys} ({healthy_keys} {t('healthy')})\n"
+                f"{t('models_count')}: {len(config.free_models)}\n"
+                f"{t('recent_logs')}:\n{recent_logs}",
                 reply_markup=self._admin_main_menu()
             )
 
         elif data.startswith("admin_users"):
             all_users = user_db.all_users
             if not all_users:
-                await query.edit_message_text("No users yet.", reply_markup=self._admin_main_menu())
+                await query.edit_message_text(t("no_users"), reply_markup=self._admin_main_menu())
                 return
             per_page = 10
             page = 0
@@ -811,9 +923,9 @@ class TelegramBot:
                 nav.append(InlineKeyboardButton("▶️", callback_data=f"admin_users_page_{page+1}"))
             if nav:
                 keyboard.append(nav)
-            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="admin_back_main")])
+            keyboard.append([InlineKeyboardButton(t("back_btn"), callback_data="admin_back_main")])
             await query.edit_message_text(
-                f"👥 Users ({len(all_users)})\n\nSelect a user:",
+                f"{t('user_title')} ({len(all_users)})\n\n{t('select_user')}",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
@@ -828,8 +940,8 @@ class TelegramBot:
                 username = info.get("username", str(user_id))
                 if not history:
                     await query.edit_message_text(
-                        "No chat history.",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data=f"admin_user_{user_id}")]])
+                        t("no_chat_history"),
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t("back_btn"), callback_data=f"admin_user_{user_id}")]])
                     )
                     return
                 per_page = 5
@@ -837,7 +949,7 @@ class TelegramBot:
                 start_idx = max(0, len(history) - (page + 1) * per_page)
                 end_idx = len(history) - page * per_page
                 messages_slice = history[start_idx:end_idx]
-                lines = [f"📋 History: {username} (p.{page+1}/{total_pages})\n"]
+                lines = [f"📋 {username} (p.{page+1}/{total_pages})\n"]
                 for msg in messages_slice:
                     role = msg.get("role", "?")
                     content = msg.get("content", "")
@@ -856,7 +968,7 @@ class TelegramBot:
                     nav.append(InlineKeyboardButton("▶️", callback_data=f"admin_user_history_{user_id}_{page+1}"))
                 if nav:
                     keyboard.append(nav)
-                keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"admin_user_{user_id}")])
+                keyboard.append([InlineKeyboardButton(t("back_btn"), callback_data=f"admin_user_{user_id}")])
                 await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
             else:
                 user_id = int(rest)
@@ -866,21 +978,21 @@ class TelegramBot:
                 first_seen = info.get("first_seen", "?")[:10]
                 last_seen = info.get("last_seen", "?")[:10]
                 text = (
-                    f"👤 User: {username}\n"
+                    f"👤 {username}\n"
                     f"ID: {user_id}\n"
-                    f"Messages: {msgs}\n"
-                    f"First seen: {first_seen}\n"
-                    f"Last seen: {last_seen}"
+                    f"{t('messages')}: {msgs}\n"
+                    f"{t('first_seen')}: {first_seen}\n"
+                    f"{t('last_seen')}: {last_seen}"
                 )
                 keyboard = [
-                    [InlineKeyboardButton("📋 Chat History", callback_data=f"admin_user_history_{user_id}_0")],
-                    [InlineKeyboardButton("🔙 Back", callback_data="admin_users")],
+                    [InlineKeyboardButton(t("chat_history_btn"), callback_data=f"admin_user_history_{user_id}_0")],
+                    [InlineKeyboardButton(t("back_btn"), callback_data="admin_users")],
                 ]
                 await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
         elif data == "admin_back_main":
             await query.edit_message_text(
-                "🤖 Admin Control Panel",
+                t("control_panel"),
                 reply_markup=self._admin_main_menu()
             )
 
@@ -890,7 +1002,7 @@ class TelegramBot:
         await self.application.updater.start_polling()
         logger.info("Bot started polling.")
         try:
-            await asyncio.Event().wait()
+            await _shutdown_event.wait()
         except (KeyboardInterrupt, asyncio.CancelledError):
             pass
         finally:
@@ -906,7 +1018,7 @@ class TelegramBot:
         logger.info(f"Webhook set to {url}")
         # Keep running — Flask serves, this just keeps app alive
         try:
-            await asyncio.Event().wait()
+            await _shutdown_event.wait()
         except (KeyboardInterrupt, asyncio.CancelledError):
             pass
         finally:
@@ -979,6 +1091,11 @@ async def _setup_webhook():
 
 async def main():
     _prompt_config()
+    loop = asyncio.get_event_loop()
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _shutdown_event.set)
+    except NotImplementedError:
+        pass
 
     if not config.bot_token:
         print("ERROR: Bot token is required.")
