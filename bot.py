@@ -138,6 +138,21 @@ class Config:
             return f"ssh://{user}@{host}:{port}"
         return f"ssh://{user}@{host}"
 
+    async def _auto_ssh_url_async(self):
+        if self.ssh_url:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.get("https://api.ipify.org")
+                if r.status_code == 200:
+                    ip = r.text.strip()
+                    env = os.environ
+                    user = env.get("SSH_USER", "root")
+                    port = env.get("SSH_PORT", "22")
+                    self.ssh_url = f"ssh://{user}@{ip}:{port}" if port != "22" else f"ssh://{user}@{ip}"
+        except Exception:
+            pass
+
     def save(self):
         data = {
             "bot_token": self.bot_token,
@@ -254,7 +269,6 @@ ADMIN_STRINGS = {
     "last_seen": {"ru": "Последний раз", "en": "Last seen"},
     "question_answered": {"ru": "✅ Вы выбрали: {value}", "en": "✅ You selected: {value}"},
     "ssh_btn": {"ru": "🔗 SSH сервер", "en": "🔗 SSH Server"},
-    "ssh_no_url": {"ru": "SSH URL не настроен. Укажите в Настройки → SSH URL.", "en": "SSH URL not configured. Set it in Config → SSH URL."},
 }
 
 def t(key: str, **kwargs) -> str:
@@ -941,8 +955,6 @@ class TelegramBot:
         ]
         if config.ssh_url:
             keys.append([InlineKeyboardButton(t("ssh_btn"), url=config.ssh_url)])
-        else:
-            keys.append([InlineKeyboardButton(t("ssh_btn"), callback_data="admin_ssh")])
         keys.extend([
             [InlineKeyboardButton(t("lang_toggle"), callback_data="admin_toggle_lang")],
             [InlineKeyboardButton(t("exit"), callback_data="admin_exit")],
@@ -1064,9 +1076,6 @@ class TelegramBot:
             await query.edit_message_text(
                 f"Current {key} = {current}\nSend the new value as a JSON value."
             )
-
-        elif data == "admin_ssh":
-            await query.edit_message_text(t("ssh_no_url"), reply_markup=self._admin_main_menu())
 
         elif data == "admin_alerts":
             admins = config.admins
@@ -1255,6 +1264,7 @@ class TelegramBot:
             )
 
     async def run_polling(self):
+        await config._auto_ssh_url_async()
         await self.application.initialize()
         await self.application.start()
         await self.application.updater.start_polling()
@@ -1270,6 +1280,7 @@ class TelegramBot:
             await self.application.shutdown()
 
     async def run_webhook(self, url: str):
+        await config._auto_ssh_url_async()
         await self.application.initialize()
         await self.application.start()
         await self.application.bot.set_webhook(url=url)
@@ -1354,6 +1365,7 @@ async def _setup_webhook():
 
 async def main():
     _prompt_config()
+    await config._auto_ssh_url_async()
     loop = asyncio.get_event_loop()
     try:
         loop.add_signal_handler(signal.SIGTERM, _shutdown_event.set)
