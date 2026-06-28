@@ -118,40 +118,6 @@ class Config:
         self.webhook_url = raw.get("webhook_url", "")
         self.admins = raw.get("admins", [])
         self.admin_ui_lang = raw.get("admin_ui_lang", "ru")
-        self.ssh_url = raw.get("ssh_url", "") or self._auto_ssh_url()
-
-    @staticmethod
-    def _auto_ssh_url() -> str:
-        env = os.environ
-        host = (
-            env.get("SSH_HOST", "")
-            or env.get("RAILWAY_PUBLIC_DOMAIN", "")
-            or env.get("RENDER_EXTERNAL_URL", "")
-            or env.get("REPLIT_DEV_DOMAIN", "")
-        )
-        if not host:
-            return ""
-        host = host.replace("https://", "").replace("http://", "").rstrip("/")
-        user = env.get("SSH_USER", "root")
-        port = env.get("SSH_PORT", "22")
-        if port != "22":
-            return f"ssh://{user}@{host}:{port}"
-        return f"ssh://{user}@{host}"
-
-    async def _auto_ssh_url_async(self):
-        if self.ssh_url:
-            return
-        try:
-            async with httpx.AsyncClient(timeout=5) as c:
-                r = await c.get("https://api.ipify.org")
-                if r.status_code == 200:
-                    ip = r.text.strip()
-                    env = os.environ
-                    user = env.get("SSH_USER", "root")
-                    port = env.get("SSH_PORT", "22")
-                    self.ssh_url = f"ssh://{user}@{ip}:{port}" if port != "22" else f"ssh://{user}@{ip}"
-        except Exception:
-            pass
 
     def save(self):
         data = {
@@ -169,7 +135,6 @@ class Config:
             "webhook_url": self.webhook_url,
             "admins": self.admins,
             "admin_ui_lang": self.admin_ui_lang,
-            "ssh_url": self.ssh_url,
         }
         save_json(FILES["config"], data)
 
@@ -268,7 +233,6 @@ ADMIN_STRINGS = {
     "first_seen": {"ru": "Впервые", "en": "First seen"},
     "last_seen": {"ru": "Последний раз", "en": "Last seen"},
     "question_answered": {"ru": "✅ Вы выбрали: {value}", "en": "✅ You selected: {value}"},
-    "ssh_btn": {"ru": "🔗 SSH сервер", "en": "🔗 SSH Server"},
 }
 
 def t(key: str, **kwargs) -> str:
@@ -953,8 +917,6 @@ class TelegramBot:
             [InlineKeyboardButton(t("stats"), callback_data="admin_stats")],
             [InlineKeyboardButton(t("alerts"), callback_data="admin_alerts")],
         ]
-        if config.ssh_url:
-            keys.append([InlineKeyboardButton(t("ssh_btn"), url=config.ssh_url)])
         keys.extend([
             [InlineKeyboardButton(t("lang_toggle"), callback_data="admin_toggle_lang")],
             [InlineKeyboardButton(t("exit"), callback_data="admin_exit")],
@@ -1063,7 +1025,6 @@ class TelegramBot:
                 [InlineKeyboardButton(f"{t('summary_length')} ({config.summary_length})", callback_data="admin_config_summary_length")],
                 [InlineKeyboardButton(f"{t('typing_animation')} ({config.typing_animation})", callback_data="admin_config_typing")],
                 [InlineKeyboardButton(f"{t('timeout')} ({config.request_timeout}s)", callback_data="admin_config_timeout")],
-                [InlineKeyboardButton(f"SSH URL ({config.ssh_url[:30] + '...' if len(config.ssh_url) > 30 else config.ssh_url or '⬜'})", callback_data="admin_config_ssh_url")],
                 [InlineKeyboardButton(t("back_btn"), callback_data="admin_back_main")],
             ]
             await query.edit_message_text(t("config_settings"), reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1264,7 +1225,6 @@ class TelegramBot:
             )
 
     async def run_polling(self):
-        await config._auto_ssh_url_async()
         await self.application.initialize()
         await self.application.start()
         await self.application.updater.start_polling()
@@ -1280,7 +1240,6 @@ class TelegramBot:
             await self.application.shutdown()
 
     async def run_webhook(self, url: str):
-        await config._auto_ssh_url_async()
         await self.application.initialize()
         await self.application.start()
         await self.application.bot.set_webhook(url=url)
@@ -1365,7 +1324,6 @@ async def _setup_webhook():
 
 async def main():
     _prompt_config()
-    await config._auto_ssh_url_async()
     loop = asyncio.get_event_loop()
     try:
         loop.add_signal_handler(signal.SIGTERM, _shutdown_event.set)
