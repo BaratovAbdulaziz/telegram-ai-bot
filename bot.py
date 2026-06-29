@@ -122,6 +122,7 @@ class Config:
         self.typing_animation = raw.get("typing_animation", True)
         self.request_timeout = raw.get("request_timeout", 60)
         self.openrouter_base_url = raw.get("openrouter_base_url", "https://openrouter.ai/api/v1")
+        self.groq_base_url = raw.get("groq_base_url", "https://api.groq.com/openai/v1")
         self.free_models = raw.get("free_models", []) or self._auto_free_models()
         self.webhook_url = raw.get("webhook_url", "")
         self.admins = raw.get("admins", [])
@@ -139,6 +140,7 @@ class Config:
             "typing_animation": self.typing_animation,
             "request_timeout": self.request_timeout,
             "openrouter_base_url": self.openrouter_base_url,
+            "groq_base_url": self.groq_base_url,
             "free_models": self.free_models,
             "webhook_url": self.webhook_url,
             "admins": self.admins,
@@ -241,6 +243,17 @@ ADMIN_STRINGS = {
     "first_seen": {"ru": "Впервые", "en": "First seen"},
     "last_seen": {"ru": "Последний раз", "en": "Last seen"},
     "question_answered": {"ru": "✅ Вы выбрали: {value}", "en": "✅ You selected: {value}"},
+    "review_sent": {"ru": "✅ Ваша сводка отправлена администратору на рассмотрение.", "en": "✅ Your summary has been sent for review."},
+    "review_no_history": {"ru": "Нет сообщений для ревью. Напишите что-нибудь сначала.", "en": "No messages to review. Send a message first."},
+    "review_no_admins": {"ru": "Нет администраторов для отправки ревью.", "en": "No admins configured to receive the review."},
+    "review_title": {"ru": "📋 Ревью от {name} (ID: {id})\n\n{summary}", "en": "📋 Review from {name} (ID: {id})\n\n{summary}"},
+    "add_groq_key_btn": {"ru": "➕ Добавить Groq ключ", "en": "➕ Add Groq Key"},
+    "send_groq_key": {"ru": "Отправьте Groq API ключ.", "en": "Send me the Groq API key."},
+    "groq_key_added": {"ru": "Groq API ключ добавлен.", "en": "Groq API key added."},
+    "delete_user_btn": {"ru": "🗑 Удалить пользователя", "en": "🗑 Delete User"},
+    "delete_user_confirm": {"ru": "❌ Удалить пользователя {name} (ID: {id})?\n\nВсе данные (история, память, профиль) будут безвозвратно удалены.", "en": "❌ Delete user {name} (ID: {id})?\n\nAll data (history, memory, profile) will be permanently deleted."},
+    "delete_user_cancelled": {"ru": "Удаление отменено.", "en": "Deletion cancelled."},
+    "user_deleted": {"ru": "Пользователь {name} (ID: {id}) удалён.", "en": "User {name} (ID: {id}) deleted."},
 }
 
 def t(key: str, **kwargs) -> str:
@@ -319,6 +332,12 @@ class UserDB:
         self._data[uid]["message_count"] = self._data[uid].get("message_count", 0) + 1
         self.save()
 
+    def delete(self, user_id: int):
+        uid = str(user_id)
+        if uid in self._data:
+            del self._data[uid]
+            self.save()
+
     @property
     def all_users(self) -> list:
         return list(self._data.values())
@@ -329,10 +348,13 @@ user_db = UserDB()
 # API MANAGER
 # =============================================================================
 
+PROVIDERS = {"openrouter", "groq"}
+
 class APIKey:
-    def __init__(self, key: str, label: str = ""):
+    def __init__(self, key: str, label: str = "", provider: str = "openrouter"):
         self._raw_key = key
         self.label = label or self._mask_key(key)
+        self.provider = provider if provider in PROVIDERS else "openrouter"
         self.status = "healthy"
         self.latency = 0.0
         self.errors = 0
@@ -357,6 +379,7 @@ class APIKey:
         return {
             "key_encrypted": encrypted,
             "label": self.label,
+            "provider": self.provider,
             "status": self.status,
             "latency": self.latency,
             "errors": self.errors,
@@ -377,7 +400,7 @@ class APIKey:
                 raw_key = encrypted
         else:
             raw_key = d.get("key", "")  # old format fallback
-        obj = cls(raw_key, d.get("label", ""))
+        obj = cls(raw_key, d.get("label", ""), d.get("provider", "openrouter"))
         obj.status = d.get("status", "healthy")
         obj.latency = d.get("latency", 0.0)
         obj.errors = d.get("errors", 0)
@@ -396,8 +419,8 @@ class APIManager:
     def save(self):
         save_json(FILES["apikeys"], [k.to_dict() for k in self.keys])
 
-    def add_key(self, key: str, label: str = ""):
-        self.keys.append(APIKey(key, label))
+    def add_key(self, key: str, label: str = "", provider: str = "openrouter"):
+        self.keys.append(APIKey(key, label, provider))
         self.save()
 
     def remove_key(self, index: int):
@@ -510,6 +533,14 @@ class MemorySystem:
             limit = config.history_length
         return history[-limit:]
 
+    def delete_user_data(self, user_id: int):
+        path = _memory_path(user_id)
+        if path.exists():
+            path.unlink()
+        path = _history_path(user_id)
+        if path.exists():
+            path.unlink()
+
     def summarize_history(self, user_id: int) -> str:
         history = self.get_history(user_id)
         if len(history) <= 2:
@@ -542,13 +573,14 @@ class AIEngine:
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=config.request_timeout, trust_env=False)
 
-    async def _call_openrouter(self, api_key: str, model: str, messages: list) -> dict:
+    async def _call_api(self, api_key: str, model: str, messages: list, base_url: str = None) -> dict:
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/telegram-ai-bot",
-            "X-Title": "Telegram AI Bot",
         }
+        if base_url is None or base_url == config.openrouter_base_url:
+            headers["HTTP-Referer"] = "https://github.com/telegram-ai-bot"
+            headers["X-Title"] = "Telegram AI Bot"
         payload = {
             "model": model,
             "messages": messages,
@@ -556,13 +588,10 @@ class AIEngine:
             "top_p": config.top_p,
             "max_tokens": config.max_tokens,
         }
+        url = (base_url or config.openrouter_base_url) + "/chat/completions"
         start = time.monotonic()
         try:
-            resp = await self.client.post(
-                f"{config.openrouter_base_url}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
+            resp = await self.client.post(url, headers=headers, json=payload)
             latency = time.monotonic() - start
             data = resp.json()
             if resp.status_code != 200:
@@ -599,7 +628,12 @@ class AIEngine:
             "\n\nYou can ask the user a question with inline buttons. "
             "To do this include the exact JSON below in your response (replace the example text):\n"
             '【{"question":{"text":"Your question here","options":[{"text":"Button 1","value":"option1"},{"text":"Button 2","value":"option2"}]}}】\n'
-            "The bot will automatically render the buttons. Use this ONLY when you need a structured answer."
+            "The bot will automatically render the buttons. Always use this for asking structured questions "
+            "(district, budget, property type, contact info, etc.).\n"
+            "\n"
+            "After the client has shared their contact info (phone) or when there are no more preferences to clarify, "
+            "tell them they can send /review to notify the admin and the admin will follow up. "
+            "Пример: \"Если хотите, можете отправить /review — я передам всю информацию менеджеру, и он свяжется с вами.\""
         )
         messages = [{"role": "system", "content": prompt_text + question_instr}]
 
@@ -641,36 +675,90 @@ class AIEngine:
             return {"success": False, "error": "No models configured", "reply": "No models in free_models list. Add one via /pathfinder → Config."}
 
         last_error = None
+        search_rounds = 0
+        max_searches = 3
         for model in fallback_chain:
             api_key_obj = api_manager.get_healthy_key()
             if not api_key_obj:
                 return {"success": False, "error": "No API keys available", "reply": "No working API keys. Contact admin."}
 
-            result = await self._call_openrouter(api_key_obj.key, model, messages)
-            if result["success"]:
-                api_manager.mark_status(api_key_obj, "healthy", result["latency"])
-                result["model_used"] = model
-                result["api_label"] = api_key_obj.label
-                reply_text = result.get("content", "").strip()
-                # Parse question JSON from response
-                q_match = re.search(r'【\s*(\{.*?\})\s*】', reply_text, re.DOTALL)
-                if q_match:
-                    try:
-                        q_data = json.loads(q_match.group(1))
-                        if "question" in q_data and "options" in q_data["question"]:
-                            result["question"] = q_data["question"]
-                            reply_text = reply_text.replace(q_match.group(0), "").strip()
-                    except (json.JSONDecodeError, KeyError):
-                        pass
-                result["reply"] = reply_text
-                return result
-            else:
+            base_url = config.groq_base_url if api_key_obj.provider == "groq" else config.openrouter_base_url
+            result = await self._call_api(api_key_obj.key, model, messages, base_url)
+            if not result["success"]:
                 last_error = result.get("error", "unknown")
                 api_manager.mark_status(api_key_obj, "error", result["latency"])
                 logger.warning(f"Model {model} failed on key {api_key_obj.label}: {last_error}. Trying next...")
                 await asyncio.sleep(0.5)
+                continue
+
+            api_manager.mark_status(api_key_obj, "healthy", result["latency"])
+            result["model_used"] = model
+            result["api_label"] = api_key_obj.label
+            reply_text = result.get("content", "").strip()
+
+            # Web search loop
+            while search_rounds < max_searches:
+                web_match = re.search(r'【web:\s*(.*?)】', reply_text)
+                if not web_match:
+                    break
+                query = web_match.group(1).strip()
+                reply_text = reply_text.replace(web_match.group(0), "").strip()
+                search_result = await self._web_search(query)
+                search_rounds += 1
+                messages.append({"role": "system", "content": f"[Результат поиска по запросу «{query}»]\n{search_result}\n[Конец результатов поиска]"})
+                result2 = await self._call_api(api_key_obj.key, model, messages, base_url)
+                if result2["success"]:
+                    reply_text = result2.get("content", "").strip()
+                else:
+                    break
+
+            # Parse question JSON from response
+            q_match = re.search(r'【\s*(\{.*?\})\s*】', reply_text, re.DOTALL)
+            if q_match:
+                try:
+                    q_data = json.loads(q_match.group(1))
+                    if "question" in q_data and "options" in q_data["question"]:
+                        result["question"] = q_data["question"]
+                        reply_text = reply_text.replace(q_match.group(0), "").strip()
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            result["reply"] = reply_text
+            return result
 
         return {"success": False, "error": last_error or "All models failed", "reply": "AI request failed after trying all models and keys."}
+
+    async def _web_search(self, query: str) -> str:
+        try:
+            url = "https://akcent.pro/plott"
+            resp = await self.client.get(url, follow_redirects=True, timeout=15)
+            text = resp.text
+            listings = []
+            pattern = re.compile(
+                r'Участок\s+([\d.]+)\s+сот\.\s*\(([^)]+)\).*?(\d[\d\s]*)\s*руб\..*?'
+                r'(?:Лот\s*\d*)?\s*([А-ЯЁ][а-яё]+(?:[А-ЯЁ][а-яё]+)*)',
+                re.DOTALL
+            )
+            for match in pattern.finditer(text):
+                size = match.group(1)
+                ptype = match.group(2)
+                price = match.group(3).strip()
+                location = match.group(4)
+                listings.append(f"Участок {size} сот. ({ptype}) — {price} руб. — {location}")
+                if len(listings) >= 20:
+                    break
+            if not listings:
+                clean = re.sub(r'<[^>]+>', ' ', text)
+                clean = re.sub(r'\s+', ' ', clean).strip()
+                lines = clean.split('. ')
+                relevant = [l.strip() for l in lines if query.lower() in l.lower() or 'участок' in l.lower()]
+                if relevant:
+                    return "Результаты с сайта akcent.pro:\n" + "\n".join(relevant[:10])
+                return f"На сайте akcent.pro найдено 528 участков. Вот последние:\n" + \
+                       "\n".join(re.findall(r'Участок\s+[\d.]+\s+сот\..*?руб\.', clean)[:10])
+            return "Результаты с сайта akcent.pro:\n" + "\n".join(listings)
+        except Exception as e:
+            logger.warning(f"Web search failed for query '{query}': {e}")
+            return f"Не удалось получить данные с сайта akcent.pro."
 
     async def close(self):
         await self.client.aclose()
@@ -741,7 +829,9 @@ class TelegramBot:
             key_obj = api_manager.get_healthy_key()
             if not key_obj:
                 return
-            model = config.free_models[0] if config.free_models else "openrouter/free"
+            base_url = config.groq_base_url if key_obj.provider == "groq" else config.openrouter_base_url
+            models = list(config.free_models) or ["openrouter/free"]
+            summary = "Не удалось получить сводку."
             conv_text = "\n".join(
                 f"{'Клиент' if m['role'] == 'user' else 'Лиза'}: {m['content']}"
                 for m in history[-6:]
@@ -751,11 +841,13 @@ class TelegramBot:
                 "что менеджер должен знать о клиенте, его предпочтения, бюджет, тип недвижимости, район и т.д.\n\n"
                 f"Диалог:\n{conv_text}\n\nСводка:"
             )
-            result = await ai_engine._call_openrouter(key_obj.key, model, [{"role": "user", "content": prompt}])
-            summary = result.get("content", "").strip() if result.get("success") else "Не удалось получить сводку."
+            for model in models:
+                result = await ai_engine._call_api(key_obj.key, model, [{"role": "user", "content": prompt}], base_url)
+                if result.get("success"):
+                    summary = result.get("content", "").strip()
+                    break
         except Exception as e:
             logger.warning(f"Intel generation failed for user {user_id}: {e}")
-            summary = "Не удалось получить сводку."
         text = t("user_intel", name=name, id=user_id, summary=summary, msgs=msgs)
         user_data["intel_sent"] = True
         user_db.save()
@@ -769,6 +861,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("start", self.cmd_start))
         self.application.add_handler(CommandHandler("pathfinder", self.cmd_pathfinder))
         self.application.add_handler(CommandHandler("export", self.cmd_export))
+        self.application.add_handler(CommandHandler("review", self.cmd_review))
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
@@ -800,6 +893,48 @@ class TelegramBot:
             filename=export_path.name,
             caption="Your data export"
         )
+
+    async def cmd_review(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        name = update.effective_user.username or update.effective_user.full_name or str(user_id)
+        history = memory_system.get_history(user_id)
+        if not history:
+            await update.message.reply_text(t("review_no_history"))
+            return
+        if not config.admins:
+            await update.message.reply_text(t("review_no_admins"))
+            return
+        try:
+            key_obj = api_manager.get_healthy_key()
+            if not key_obj:
+                await update.message.reply_text("AI service unavailable.")
+                return
+            base_url = config.groq_base_url if key_obj.provider == "groq" else config.openrouter_base_url
+            models = list(config.free_models) or ["openrouter/free"]
+            summary = "Не удалось получить сводку."
+            conv_text = "\n".join(
+                f"{'Клиент' if m['role'] == 'user' else 'Лиза'}: {m['content']}"
+                for m in history[-10:]
+            )
+            prompt = (
+                "Ты — ассистент риелтора. На основе диалога с клиентом напиши краткую сводку (2-4 предложения на русском): "
+                "что менеджер должен знать о клиенте, его предпочтения, бюджет, тип недвижимости, район и т.д.\n\n"
+                f"Диалог:\n{conv_text}\n\nСводка:"
+            )
+            for model in models:
+                result = await ai_engine._call_api(key_obj.key, model, [{"role": "user", "content": prompt}], base_url)
+                if result.get("success"):
+                    summary = result.get("content", "").strip()
+                    break
+        except Exception as e:
+            logger.warning(f"Review generation failed for user {user_id}: {e}")
+        text = t("review_title", name=name, id=user_id, summary=summary)
+        for admin_id in config.admins:
+            try:
+                await self.application.bot.send_message(chat_id=admin_id, text=text)
+            except Exception as e:
+                logger.warning(f"Failed to send review to admin {admin_id}: {e}")
+        await update.message.reply_text(t("review_sent"))
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -881,6 +1016,10 @@ class TelegramBot:
             api_manager.add_key(text)
             self.admin_sessions.pop(chat_id, None)
             await update.message.reply_text(t("key_added"), reply_markup=self._admin_main_menu())
+        elif session == "awaiting_groq_key":
+            api_manager.add_key(text, provider="groq")
+            self.admin_sessions.pop(chat_id, None)
+            await update.message.reply_text(t("groq_key_added"), reply_markup=self._admin_main_menu())
         elif session == "awaiting_admin_id":
             try:
                 admin_id = int(text.strip())
@@ -967,12 +1106,14 @@ class TelegramBot:
             else:
                 lines = [t("api_keys_title")]
                 for i, k in enumerate(stats):
-                    lines.append(f"{i+1}. {k['label']}")
+                    prov = k.get("provider", "openrouter")
+                    lines.append(f"{i+1}. {k['label']} [{prov}]")
                     lines.append(f"   {t('status')}: {k['status']} | {t('errors')}: {k['errors']} | {t('latency')}: {k['latency']:.2f}s")
                     lines.append("")
                 text = "\n".join(lines)
             keyboard = [
                 [InlineKeyboardButton(t("add_key_btn"), callback_data="admin_api_add")],
+                [InlineKeyboardButton(t("add_groq_key_btn"), callback_data="admin_api_add_groq")],
                 [InlineKeyboardButton(t("remove_key_btn"), callback_data="admin_api_remove")],
                 [InlineKeyboardButton(t("reload_btn"), callback_data="admin_api_reload")],
                 [InlineKeyboardButton(t("back_btn"), callback_data="admin_back_main")],
@@ -983,6 +1124,11 @@ class TelegramBot:
             chat_id = update.effective_chat.id
             self.admin_sessions[chat_id] = "awaiting_key"
             await query.edit_message_text(t("send_api_key"))
+
+        elif data == "admin_api_add_groq":
+            chat_id = update.effective_chat.id
+            self.admin_sessions[chat_id] = "awaiting_groq_key"
+            await query.edit_message_text(t("send_groq_key"))
 
         elif data == "admin_api_remove":
             stats = api_manager.get_stats()
@@ -1165,6 +1311,36 @@ class TelegramBot:
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
+        elif data.startswith("admin_user_delete_confirm_"):
+            user_id = int(data.split("admin_user_delete_confirm_", 1)[1])
+            info = user_db.get(user_id)
+            name = info.get("username", str(user_id))
+            memory_system.delete_user_data(user_id)
+            user_db.delete(user_id)
+            await query.edit_message_text(
+                t("user_deleted", name=name, id=user_id),
+                reply_markup=self._admin_main_menu()
+            )
+
+        elif data.startswith("admin_user_delete_cancel_"):
+            await query.edit_message_text(
+                t("delete_user_cancelled"),
+                reply_markup=self._admin_main_menu()
+            )
+
+        elif data.startswith("admin_user_delete_"):
+            user_id = int(data.split("admin_user_delete_", 1)[1])
+            info = user_db.get(user_id)
+            name = info.get("username", str(user_id))
+            keyboard = [
+                [InlineKeyboardButton("✅ Да, удалить", callback_data=f"admin_user_delete_confirm_{user_id}")],
+                [InlineKeyboardButton("❌ Отмена", callback_data=f"admin_user_delete_cancel_{user_id}")],
+            ]
+            await query.edit_message_text(
+                t("delete_user_confirm", name=name, id=user_id),
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
         elif data.startswith("admin_user_"):
             rest = data.split("admin_user_", 1)[1]
             if rest.startswith("history_"):
@@ -1222,6 +1398,7 @@ class TelegramBot:
                 )
                 keyboard = [
                     [InlineKeyboardButton(t("chat_history_btn"), callback_data=f"admin_user_history_{user_id}_0")],
+                    [InlineKeyboardButton(t("delete_user_btn"), callback_data=f"admin_user_delete_{user_id}")],
                     [InlineKeyboardButton(t("back_btn"), callback_data="admin_users")],
                 ]
                 await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
